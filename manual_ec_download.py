@@ -16,9 +16,9 @@ COOKIE = "_ga=GA1.1.882521766.1754558211; _ga_W44WTTGM0B=GS2.1.s1754558210$o1$g1
 
 # 👉 Default values (User to update for Govindacheri, Walaja, Ranipet)
 # Note: TNGIS codes often differ from Census codes (Govindacheri Census: 630504).
-# Common TNGIS District Codes: Vellore (Old) = 04, Ranipet (New) = ??
-DEFAULT_DISTRICT_CODE = "" # Enter Ranipet Code here if known
-DEFAULT_TALUK_CODE = ""    # Enter Walaja Taluk Code here if known
+# Common TNGIS District Codes: Vellore (Old) = 04, Ranipet (New) = 37 (Confirmed from error log)
+DEFAULT_DISTRICT_CODE = "37" # Ranipet
+DEFAULT_TALUK_CODE = "01"    # Trying 01 for Walaja (02 was Arcot)
 
 OUTPUT_DIR = "Govindacheri_EC_Output"
 os.makedirs(OUTPUT_DIR, exist_ok=True)
@@ -76,33 +76,70 @@ def try_download(payload: dict, filename: str = None) -> bool:
         # 2) JSON response
         try:
             j = resp.json()
+            
+            # Request: Write response to JSON file
+            debug_json_path = os.path.join(OUTPUT_DIR, "debug_last_response.json")
+            with open(debug_json_path, "w", encoding="utf-8") as f:
+                json.dump(j, f, indent=2)
+            print(f"📄 Saved full API response to: {debug_json_path}")
+
         except Exception:
             print("❌ Not JSON / Not PDF. Status:", resp.status_code, "Snippet:", resp.text[:400])
             return False
+
+        # Debug: Check for specific TNGIS status codes
+        ec_data = j.get("EC", {})
+        ec_status = ec_data.get("statusCode")
+        
+        if ec_status:
+            if ec_status == 100:
+                print("✅ Status 100: Success! Looking for PDF content...")
+            elif ec_status == 1003:
+                print("⚠️ Status 1003: No Data Found / Generation Failed for these details.")
+            else:
+                print(f"⚠️ API returned generic Status Code: {ec_status}")
+        
+        # Debug: Print Village Name if available to confirm location
+        try:
+            village_list = j.get("first", {}).get("data", {}).get("regVillageBeanList", [])
+            if village_list:
+                v = village_list[0]
+                print(f"📍 Hit Village: {v.get('regVillageNameEng')} ({v.get('regVillageNameTam')}) | SRO: {v.get('sroNameEng')}")
+        except:
+            pass
 
         # quick debug
         if "message" in j:
             print("Server message:", j.get("message"))
 
-        # 2a) Base64 scan (nested keys handle)
-        def find_b64(o):
-            if isinstance(o, dict):
-                for v in o.values():
-                    r = find_b64(v)
-                    if r: return r
-            elif isinstance(o, list):
-                for v in o:
-                    r = find_b64(v)
-                    if r: return r
-            elif isinstance(o, str):
-                s = o.strip()
-                if s.startswith("data:application/pdf;base64,"):
-                    s = s.split(",",1)[1]
-                if (len(s) > 100) and (s[:5].lower() == "jvber"):
-                    return s
-            return None
+        # 2a) Explicit check for EC -> Base64String
+        b64 = None
+        if "EC" in j and "Base64String" in j["EC"]:
+            b64 = j["EC"]["Base64String"]
+            print("Tv Found 'Base64String' inside 'EC' object.")
 
-        b64 = find_b64(j)
+        # 2b) Fallback recursive scan
+        if not b64:
+            def find_b64(o):
+                if isinstance(o, dict):
+                    if "Base64String" in o:
+                        return o["Base64String"]
+                    for v in o.values():
+                        r = find_b64(v)
+                        if r: return r
+                elif isinstance(o, list):
+                    for v in o:
+                        r = find_b64(v)
+                        if r: return r
+                elif isinstance(o, str):
+                    s = o.strip()
+                    if s.startswith("data:application/pdf;base64,"):
+                        s = s.split(",",1)[1]
+                    if (len(s) > 100) and (s[:5].lower() == "jvber"):
+                        return s
+                return None
+            b64 = find_b64(j)
+
         if b64:
             try:
                 pdf = base64.b64decode(b64)
@@ -111,7 +148,7 @@ def try_download(payload: dict, filename: str = None) -> bool:
             except Exception as e:
                 print("Base64 decode fail:", e)
 
-        # 2b) Maybe JSON gives a PDF URL
+        # 2c) Maybe JSON gives a PDF URL
         for k in ("url", "pdfUrl", "fileUrl"):
             url = j.get(k)
             if isinstance(url, str) and url.lower().endswith(".pdf"):
@@ -120,7 +157,7 @@ def try_download(payload: dict, filename: str = None) -> bool:
                     save_pdf_bytes(r2.content, filename)
                     return True
 
-        print("⚠️ JSON received but no PDF/base64 found. Full JSON (trimmed):", str(j)[:800])
+        print("⚠️ JSON received but no PDF found. Check 'debug_last_response.json' for details.")
         return False
         
     except Exception as e:
